@@ -19,5 +19,5 @@ On first run, `.desktop` file will be created, so you can launch program on over
 4. 즐기세요
 
 ## 메모
-GUI 프로그램(odin4_gui)는 odin4 프로그램과 같이 있지 않으면 플래싱 기능을 수행할 수 없습니다
-처음 실행시 `.desktop` 파일이 생성되기 때문에 이후에는 대시보드나 Dock 등에서 프로그램 실행이 가능합니다
+GUI 프로그램(odin4_gui)는 odin4 프로그램과 같이 있지 않으면 플래싱 기능을 수행할 수 없습니다.
+처음 실행시 `.desktop` 파일이 생성되기 때문에 이후에는 대시보드나 Dock 등에서 프로그램 실행이 가능합니다.
