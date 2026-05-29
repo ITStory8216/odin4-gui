@@ -9,9 +9,9 @@
 4. Enjoy!
 
 ## Notes
-GUI program(odin4_gui) requires odin4 program on same folder! If is not, flashing files will not work.
-On first run, `.desktop` file will be created, so you can launch program on overview, dock or else.
-If your device is not detected, try launching as root(`sudo ./odin4_gui`)
+- GUI program(odin4_gui) requires odin4 program on same folder! If is not, flashing files will not work.
+- On first run, `.desktop` file will be created, so you can launch program on overview, dock or else.
+- If your device is not detected, try launching as root(`sudo ./odin4_gui`)
 
 # 유출된 odin4를 활용한 GTK GUI
 
@@ -22,6 +22,6 @@ If your device is not detected, try launching as root(`sudo ./odin4_gui`)
 4. 즐기세요
 
 ## 메모
-GUI 프로그램(odin4_gui)는 odin4 프로그램과 같이 있지 않으면 플래싱 기능을 수행할 수 없습니다.
-처음 실행시 `.desktop` 파일이 생성되기 때문에 이후에는 대시보드나 Dock 등에서 프로그램 실행이 가능합니다.
+- GUI 프로그램(odin4_gui)는 odin4 프로그램과 같이 있지 않으면 플래싱 기능을 수행할 수 없습니다.
+- 처음 실행시 `.desktop` 파일이 생성되기 때문에 이후에는 - 대시보드나 Dock 등에서 프로그램 실행이 가능합니다.
 연결된 기기가 감지되지 않을 경우 루트 권한으로 실행해보세요(`sudo ./odin4_gui`)
