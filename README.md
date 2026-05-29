@@ -2,7 +2,7 @@
 
 ## How to use
 1. Download lastest release
-2. Open extracted folder and open terminal
+2. Open terminal on extracted folder
 3. Run `./odin4_gui` (or open odin4_gui on your file manager)
 4. Enjoy!
 
