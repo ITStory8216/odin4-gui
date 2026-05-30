@@ -2,6 +2,9 @@
 
 <img width="1688" height="1788" alt="Screenshot from 2026-05-30 13-59-44" src="https://github.com/user-attachments/assets/9f9d8145-8326-453c-a335-1fdc58767f8a" />
 
+- GTK4/libadwhita
+- Drag and drop support(드래그 앤 드랍 지원)
+
 ## How to use
 1. Download lastest release
 2. Open terminal on extracted folder
