@@ -1,6 +1,6 @@
 # GTK GUI for leaked odin4
 
-<img width="1788" height="1776" alt="Screenshot from 2026-05-29 23-48-57" src="https://github.com/user-attachments/assets/621501b5-c289-4f4e-a3e6-f7e1a1d7eac5" />
+<img width="1688" height="1788" alt="Screenshot from 2026-05-30 13-59-44" src="https://github.com/user-attachments/assets/9f9d8145-8326-453c-a335-1fdc58767f8a" />
 
 ## How to use
 1. Download lastest release
