@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <utime.h>
 
 // Globals
 GSimpleAction *action_reboot;
@@ -306,6 +307,31 @@ static void on_file_dialog_response(GObject *source_object, GAsyncResult *res, g
 static void on_browse_clicked(GtkWidget *button, gpointer user_data) {
     GtkWidget *row = GTK_WIDGET(user_data);
     GtkFileDialog *dialog = gtk_file_dialog_new();
+
+    // Create file filters
+    GtkFileFilter *firmware_filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(firmware_filter, "Firmware Files (*.tar, *.md5, *.lz4, *.img, *.bin)");
+    gtk_file_filter_add_pattern(firmware_filter, "*.tar");
+    gtk_file_filter_add_pattern(firmware_filter, "*.md5");
+    gtk_file_filter_add_pattern(firmware_filter, "*.tar.md5");
+    gtk_file_filter_add_pattern(firmware_filter, "*.lz4");
+    gtk_file_filter_add_pattern(firmware_filter, "*.img");
+    gtk_file_filter_add_pattern(firmware_filter, "*.bin");
+
+    GtkFileFilter *all_filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(all_filter, "All Files");
+    gtk_file_filter_add_pattern(all_filter, "*");
+
+    GListStore *store = g_list_store_new(GTK_TYPE_FILE_FILTER);
+    g_list_store_append(store, firmware_filter);
+    g_list_store_append(store, all_filter);
+
+    gtk_file_dialog_set_filters(dialog, G_LIST_MODEL(store));
+    gtk_file_dialog_set_default_filter(dialog, firmware_filter);
+    g_object_unref(store);
+    g_object_unref(firmware_filter);
+    g_object_unref(all_filter);
+
     gtk_file_dialog_open(dialog, GTK_WINDOW(main_window), NULL, on_file_dialog_response, row);
     g_object_unref(dialog);
 }
@@ -333,16 +359,32 @@ static gboolean on_drop(GtkDropTarget *target, const GValue *value, double x, do
             char *filename = g_file_get_path(f);
             if (filename) {
                 gchar *basename = g_path_get_basename(filename);
-                if (g_str_has_prefix(basename, "AP_") || g_str_has_prefix(basename, "KIES_HOME_"))
-                    set_row_text(row_ap, filename);
-                else if (g_str_has_prefix(basename, "BL_"))
-                    set_row_text(row_bl, filename);
-                else if (g_str_has_prefix(basename, "CP_"))
-                    set_row_text(row_cp, filename);
-                else if (g_str_has_prefix(basename, "CSC_") || g_str_has_prefix(basename, "HOME_CSC_"))
-                    set_row_text(row_csc, filename);
-                else if (g_str_has_prefix(basename, "USERDATA_"))
-                    set_row_text(row_ums, filename);
+                gchar *lower_base = g_ascii_strdown(basename, -1);
+                
+                gboolean valid_ext = g_str_has_suffix(lower_base, ".tar") ||
+                                     g_str_has_suffix(lower_base, ".md5") ||
+                                     g_str_has_suffix(lower_base, ".lz4") ||
+                                     g_str_has_suffix(lower_base, ".img") ||
+                                     g_str_has_suffix(lower_base, ".bin");
+
+                if (valid_ext) {
+                    if (g_str_has_prefix(basename, "AP_") || g_str_has_prefix(basename, "KIES_HOME_"))
+                        set_row_text(row_ap, filename);
+                    else if (g_str_has_prefix(basename, "BL_"))
+                        set_row_text(row_bl, filename);
+                    else if (g_str_has_prefix(basename, "CP_"))
+                        set_row_text(row_cp, filename);
+                    else if (g_str_has_prefix(basename, "CSC_") || g_str_has_prefix(basename, "HOME_CSC_"))
+                        set_row_text(row_csc, filename);
+                    else if (g_str_has_prefix(basename, "USERDATA_"))
+                        set_row_text(row_ums, filename);
+                } else {
+                    append_log("Ignored dropped file (unsupported format): ");
+                    append_log(basename);
+                    append_log("\n");
+                }
+                
+                g_free(lower_base);
                 g_free(basename);
                 g_free(filename);
             }
@@ -356,6 +398,17 @@ static void toggle_action(GSimpleAction *a, GVariant *p, gpointer d) {
     GVariant *s = g_action_get_state(G_ACTION(a));
     g_simple_action_set_state(a, g_variant_new_boolean(!g_variant_get_boolean(s)));
     g_variant_unref(s);
+}
+
+static void show_about(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
+    GtkApplication *app = GTK_APPLICATION(user_data);
+    GtkWindow *win = gtk_application_get_active_window(app);
+    GtkWidget *about = adw_about_window_new();
+    adw_about_window_set_application_name(ADW_ABOUT_WINDOW(about), "Odin4 GUI");
+    adw_about_window_set_version(ADW_ABOUT_WINDOW(about), "1.2");
+    adw_about_window_set_developer_name(ADW_ABOUT_WINDOW(about), "Samsung Firmware Flasher GUI");
+    gtk_window_set_transient_for(GTK_WINDOW(about), win);
+    gtk_window_present(GTK_WINDOW(about));
 }
 
 static void on_activate(GtkApplication *app, gpointer user_data) {
@@ -387,6 +440,14 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     g_menu_append(section, "Nand Erase All",   "opt.nand-erase");
     g_menu_append(section, "Validation Check", "opt.val-check");
     g_menu_append_section(menu, "Flash Options", G_MENU_MODEL(section));
+
+    GSimpleAction *about_action = g_simple_action_new("about", NULL);
+    g_signal_connect(about_action, "activate", G_CALLBACK(show_about), app);
+    g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(about_action));
+
+    GMenu *about_section = g_menu_new();
+    g_menu_append(about_section, "About Odin4 GUI", "app.about");
+    g_menu_append_section(menu, NULL, G_MENU_MODEL(about_section));
     g_object_unref(section);
 
     // Main layout
@@ -499,41 +560,64 @@ void self_register() {
     // reads the absolute path of the current executable file from /proc/self/exe
     char exe_path[4096] = {0};
     ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if (len <= 0) return;
+    if (len <= 0) { g_printerr("self_register: failed to read /proc/self/exe\n"); return; }
     exe_path[len] = '\0';
     gchar *exe_dir = g_path_get_dirname(exe_path);
     const gchar *home = g_get_home_dir();
+    g_printerr("self_register: exe=%s home=%s\n", exe_path, home);
+
     gchar *desktop_dir = g_build_filename(home, ".local", "share", "applications", NULL);
-    gchar *desktop_path = g_build_filename(desktop_dir, "odin4-gui.desktop", NULL);
-    if (!g_file_test(desktop_path, G_FILE_TEST_EXISTS)) {
-        g_mkdir_with_parents(desktop_dir, 0755);
-        gchar *content = g_strdup_printf(
-            "[Desktop Entry]\n"
-            "Name=Odin4\n"
-            "Comment=Samsung Firmware Flasher\n"
-            "Exec=%s\n"
-            "Path=%s\n"
-            "Icon=system-software-install\n"
-            "Terminal=false\n"
-            "Type=Application\n"
-            "Categories=Utility;System;\n"
-            "StartupWMClass=odin4_gui\n"
-            "StartupNotify=true\n",
-            exe_path, exe_dir);
-        g_file_set_contents(desktop_path, content, -1, NULL);
-        g_free(content);
-        g_spawn_command_line_async("update-desktop-database ~/.local/share/applications", NULL);
+    gchar *new_desktop_path = g_build_filename(desktop_dir, "itstory.odin4.desktop", NULL);
+    
+    // clean up old shortcuts to prevent duplicate icons
+    const gchar *old_names[] = {"odin4-gui.desktop", "com.example.odin4.desktop", NULL};
+    for (int i = 0; old_names[i]; i++) {
+        gchar *old_path = g_build_filename(desktop_dir, old_names[i], NULL);
+        if (g_file_test(old_path, G_FILE_TEST_EXISTS)) remove(old_path);
+        g_free(old_path);
     }
+
+    g_mkdir_with_parents(desktop_dir, 0755);
+    gchar *content = g_strdup_printf(
+        "[Desktop Entry]\n"
+        "Name=Odin4 GUI\n"
+        "Comment=Samsung Firmware Flasher\n"
+        "Exec=\"%s\"\n"
+        "Path=%s\n"
+        "Icon=emblem-downloads\n"
+        "Terminal=false\n"
+        "Type=Application\n"
+        "Categories=GNOME;GTK;Utility;X-GNOME-Utilities;\n"
+        "StartupWMClass=itstory.odin4\n"
+        "StartupNotify=true\n",
+        exe_path, exe_dir);
+
+    // overwrite to ensure it's always up-to-date with current location
+    GError *error = NULL;
+    if (!g_file_set_contents(new_desktop_path, content, -1, &error)) {
+        g_printerr("self_register: failed to write %s: %s\n", new_desktop_path, error->message);
+        g_error_free(error);
+    } else {
+        g_printerr("self_register: wrote %s\n", new_desktop_path);
+    }
+    g_free(content);
+
+    // force gnome shell to detect the change
+    gchar *update_cmd = g_strdup_printf("update-desktop-database %s", desktop_dir);
+    g_spawn_command_line_sync(update_cmd, NULL, NULL, NULL, NULL);
+    g_free(update_cmd);
+    utime(desktop_dir, NULL);  // touch directory to trigger inotify
+
     g_free(exe_dir);
     g_free(desktop_dir);
-    g_free(desktop_path);
+    g_free(new_desktop_path);
 }
 
 int main(int argc, char *argv[]) {
     self_register();
     dbus_conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
 
-    AdwApplication *app = adw_application_new("com.example.odin4", G_APPLICATION_DEFAULT_FLAGS);
+    AdwApplication *app = adw_application_new("itstory.odin4", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
 
     int status = g_application_run(G_APPLICATION(app), argc, argv);
