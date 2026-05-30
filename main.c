@@ -1,4 +1,5 @@
 #include <gtk/gtk.h>
+#include <adwaita.h>
 #include <glib.h>
 #include <string.h>
 #include <stdlib.h>
@@ -6,17 +7,18 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-// options - gmenumodel / gsimpleaction based architecture
+// Globals
 GSimpleAction *action_reboot;
 GSimpleAction *action_nand_erase;
 GSimpleAction *action_val_check;
 
-GtkWidget *entry_bl;
-GtkWidget *entry_ap;
-GtkWidget *entry_cp;
-GtkWidget *entry_csc;
-GtkWidget *entry_ums;
+GtkWidget *row_bl;
+GtkWidget *row_ap;
+GtkWidget *row_cp;
+GtkWidget *row_csc;
+GtkWidget *row_ums;
 
+GtkStringList *dev_list;
 GtkWidget *combo_device;
 GtkWidget *btn_refresh;
 GtkWidget *btn_start;
@@ -27,56 +29,36 @@ GPid child_pid = 0;
 gint std_out = 0;
 gint std_err = 0;
 guint pulse_timer_id = 0;
-
 GDBusConnection *dbus_conn = NULL;
+GtkWidget *main_window = NULL;
+
+// Helper to get text from AdwEntryRow
+const char* get_row_text(GtkWidget *row) {
+    return gtk_editable_get_text(GTK_EDITABLE(row));
+}
+
+void set_row_text(GtkWidget *row, const char *text) {
+    gtk_editable_set_text(GTK_EDITABLE(row), text);
+}
 
 void update_dock_progress(double fraction, gboolean visible) {
     if (!dbus_conn) return;
-
     GVariantBuilder *b = g_variant_builder_new(G_VARIANT_TYPE("a{sv}"));
     g_variant_builder_add(b, "{sv}", "progress", g_variant_new_double(fraction));
     g_variant_builder_add(b, "{sv}", "progress-visible", g_variant_new_boolean(visible));
-
-    g_dbus_connection_call(
-        dbus_conn,
-        "com.canonical.Unity",
-        "/com/canonical/Unity/LauncherEntry",
-        "com.canonical.Unity.LauncherEntry",
-        "Update",
+    g_dbus_connection_call(dbus_conn, "com.canonical.Unity", "/com/canonical/Unity/LauncherEntry",
+        "com.canonical.Unity.LauncherEntry", "Update",
         g_variant_new("(sa{sv})", "application://odin4-gui.desktop", b),
-        NULL,
-        G_DBUS_CALL_FLAGS_NONE,
-        -1,
-        NULL, NULL, NULL
-    );
+        NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
 }
 
 void send_notification(const gchar *summary, const gchar *body, const gchar *icon) {
     if (!dbus_conn) return;
-
     GVariantBuilder *hints = g_variant_builder_new(G_VARIANT_TYPE("a{sv}"));
-
-    g_dbus_connection_call(
-        dbus_conn,
-        "org.freedesktop.Notifications",
-        "/org/freedesktop/Notifications",
-        "org.freedesktop.Notifications",
-        "Notify",
-        g_variant_new("(susssasa{sv}i)",
-            "Odin4",
-            0,
-            icon,
-            summary,
-            body,
-            NULL,
-            hints,
-            5000
-        ),
-        NULL,
-        G_DBUS_CALL_FLAGS_NONE,
-        -1,
-        NULL, NULL, NULL
-    );
+    g_dbus_connection_call(dbus_conn, "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications", "Notify",
+        g_variant_new("(susssasa{sv}i)", "Odin4", 0, icon, summary, body, NULL, hints, 5000),
+        NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
 }
 
 void append_log(const gchar *text) {
@@ -85,17 +67,17 @@ void append_log(const gchar *text) {
     gtk_text_buffer_get_end_iter(buffer, &end);
     gtk_text_buffer_insert(buffer, &end, text, -1);
     
-    GtkTextMark *mark = gtk_text_buffer_get_insert(buffer);
-    gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(text_log), mark, 0.0, TRUE, 0.0, 1.0);
+    GtkTextMark *mark = gtk_text_buffer_create_mark(buffer, NULL, &end, FALSE);
+    gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(text_log), mark, 0.0, FALSE, 0.0, 0.0);
 }
 
 gboolean on_pulse_timer(gpointer data) {
     if (child_pid != 0) {
         gtk_progress_bar_pulse(GTK_PROGRESS_BAR(progress_bar));
         gtk_progress_bar_set_text(GTK_PROGRESS_BAR(progress_bar), "Connecting / Initializing...");
-        return TRUE;
+        return G_SOURCE_CONTINUE;
     }
-    return FALSE;
+    return G_SOURCE_REMOVE;
 }
 
 gboolean read_output(GIOChannel *source, GIOCondition condition, gpointer data) {
@@ -110,43 +92,27 @@ gboolean read_output(GIOChannel *source, GIOCondition condition, gpointer data) 
             gboolean is_progress_line = FALSE;
             
             gchar *p1 = strstr(buf, "(");
-            if (p1) {
-                int percentage = 0;
-                if (sscanf(p1, "(%d%%)", &percentage) == 1) {
+            int percentage = 0;
+            if (p1 && sscanf(p1, "(%d%%)", &percentage) == 1) {
+                is_progress_line = TRUE;
+            } else {
+                gchar *p2 = strstr(buf, "\"value\":");
+                if (p2 && sscanf(p2, "\"value\":%d", &percentage) == 1) {
                     is_progress_line = TRUE;
-                    if (pulse_timer_id != 0) {
-                        g_source_remove(pulse_timer_id);
-                        pulse_timer_id = 0;
-                    }
-                    double frac = percentage / 100.0;
-                    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_bar), frac);
-                    
-                    gchar text[32];
-                    g_snprintf(text, sizeof(text), "Flashing... %d%%", percentage);
-                    gtk_progress_bar_set_text(GTK_PROGRESS_BAR(progress_bar), text);
-                    
-                    update_dock_progress(frac, TRUE);
                 }
             }
             
-            gchar *p2 = strstr(buf, "\"value\":");
-            if (p2) {
-                int percentage = 0;
-                if (sscanf(p2, "\"value\":%d", &percentage) == 1) {
-                    is_progress_line = TRUE;
-                    if (pulse_timer_id != 0) {
-                        g_source_remove(pulse_timer_id);
-                        pulse_timer_id = 0;
-                    }
-                    double frac = percentage / 100.0;
-                    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_bar), frac);
-                    
-                    gchar text[32];
-                    g_snprintf(text, sizeof(text), "Flashing... %d%%", percentage);
-                    gtk_progress_bar_set_text(GTK_PROGRESS_BAR(progress_bar), text);
-                    
-                    update_dock_progress(frac, TRUE);
+            if (is_progress_line) {
+                if (pulse_timer_id != 0) {
+                    g_source_remove(pulse_timer_id);
+                    pulse_timer_id = 0;
                 }
+                double frac = percentage / 100.0;
+                gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_bar), frac);
+                gchar text[32];
+                g_snprintf(text, sizeof(text), "Flashing... %d%%", percentage);
+                gtk_progress_bar_set_text(GTK_PROGRESS_BAR(progress_bar), text);
+                update_dock_progress(frac, TRUE);
             }
 
             gchar *temp = g_strdup(buf);
@@ -159,10 +125,12 @@ gboolean read_output(GIOChannel *source, GIOCondition condition, gpointer data) 
     }
     
     if (condition & G_IO_HUP) {
-        return FALSE;
+        return G_SOURCE_REMOVE;
     }
-    return TRUE;
+    return G_SOURCE_CONTINUE;
 }
+
+// Unused callback removed
 
 void on_child_watch(GPid pid, gint status, gpointer user_data) {
     if (status == 0) {
@@ -183,31 +151,19 @@ void on_child_watch(GPid pid, gint status, gpointer user_data) {
         }
         gchar *error_text = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
         
-        GtkWidget *toplevel = gtk_widget_get_toplevel(btn_start);
-        if (gtk_widget_is_toplevel(toplevel)) {
-            GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(toplevel),
-                                                       GTK_DIALOG_DESTROY_WITH_PARENT,
-                                                       GTK_MESSAGE_ERROR,
-                                                       GTK_BUTTONS_CLOSE,
-                                                       "Flashing Failed");
-            gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dialog),
-                                                     "Last log output:\n\n%s", error_text);
-            g_signal_connect(dialog, "response", G_CALLBACK(gtk_widget_destroy), NULL);
-            gtk_widget_show_all(dialog);
-        }
+        GtkWidget *dialog = adw_message_dialog_new(GTK_WINDOW(main_window), "Flashing Failed", error_text);
+        adw_message_dialog_add_response(ADW_MESSAGE_DIALOG(dialog), "close", "Close");
+        gtk_window_present(GTK_WINDOW(dialog));
         g_free(error_text);
         send_notification("Flashing Failed", "An error occurred. Check the log for details.", "dialog-error");
     }
     g_spawn_close_pid(pid);
     child_pid = 0;
     
-    // revert button back to start
     gtk_button_set_label(GTK_BUTTON(btn_start), "Start Flash");
-    GtkStyleContext *context = gtk_widget_get_style_context(btn_start);
-    gtk_style_context_remove_class(context, "destructive-action");
-    gtk_style_context_add_class(context, "suggested-action");
+    gtk_widget_remove_css_class(btn_start, "destructive-action");
+    gtk_widget_add_css_class(btn_start, "suggested-action");
     
-    // reset progress bar
     gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_bar), 0.0);
     gtk_progress_bar_set_text(GTK_PROGRESS_BAR(progress_bar), "Ready");
     
@@ -215,7 +171,6 @@ void on_child_watch(GPid pid, gint status, gpointer user_data) {
         g_source_remove(pulse_timer_id);
         pulse_timer_id = 0;
     }
-    
     update_dock_progress(0.0, FALSE);
 }
 
@@ -225,14 +180,15 @@ void on_refresh_clicked(GtkWidget *widget, gpointer data) {
     GError *error = NULL;
     
     if (g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, &std_out_data, NULL, NULL, &error)) {
-        gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(combo_device));
+        // Clear list
+        gtk_string_list_splice(dev_list, 0, g_list_model_get_n_items(G_LIST_MODEL(dev_list)), NULL);
         
         gchar **lines = g_strsplit(std_out_data, "\n", -1);
         int added = 0;
         for (int i = 0; lines[i] != NULL; i++) {
             gchar *line = g_strstrip(lines[i]);
             if (strlen(line) > 0 && strstr(line, "odin4") == NULL && strstr(line, "Usage") == NULL) {
-                gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo_device), line);
+                gtk_string_list_append(dev_list, line);
                 added++;
             }
         }
@@ -240,12 +196,11 @@ void on_refresh_clicked(GtkWidget *widget, gpointer data) {
         g_free(std_out_data);
         
         if (added > 0) {
-            gtk_combo_box_set_active(GTK_COMBO_BOX(combo_device), 0);
+            gtk_drop_down_set_selected(GTK_DROP_DOWN(combo_device), 0);
         } else {
-            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo_device), "No devices found");
-            gtk_combo_box_set_active(GTK_COMBO_BOX(combo_device), 0);
+            gtk_string_list_append(dev_list, "No devices found");
+            gtk_drop_down_set_selected(GTK_DROP_DOWN(combo_device), 0);
         }
-        
         append_log("Device list refreshed.\n");
     } else {
         append_log("Failed to refresh device list: ");
@@ -265,70 +220,60 @@ void on_start_clicked(GtkWidget *widget, gpointer data) {
     GPtrArray *args = g_ptr_array_new();
     g_ptr_array_add(args, g_strdup("./odin4"));
     
-    if (g_variant_get_boolean(g_action_get_state(G_ACTION(action_reboot)))) {
+    if (g_variant_get_boolean(g_action_get_state(G_ACTION(action_reboot))))
         g_ptr_array_add(args, g_strdup("--reboot"));
-    }
-    if (g_variant_get_boolean(g_action_get_state(G_ACTION(action_nand_erase)))) {
+    if (g_variant_get_boolean(g_action_get_state(G_ACTION(action_nand_erase))))
         g_ptr_array_add(args, g_strdup("-e"));
-    }
-    if (g_variant_get_boolean(g_action_get_state(G_ACTION(action_val_check)))) {
+    if (g_variant_get_boolean(g_action_get_state(G_ACTION(action_val_check))))
         g_ptr_array_add(args, g_strdup("-V"));
-    }
     
-    const gchar *bl = gtk_entry_get_text(GTK_ENTRY(entry_bl));
+    const gchar *bl = get_row_text(row_bl);
     if (bl && strlen(bl) > 0) { g_ptr_array_add(args, g_strdup("-b")); g_ptr_array_add(args, g_strdup(bl)); }
     
-    const gchar *ap = gtk_entry_get_text(GTK_ENTRY(entry_ap));
+    const gchar *ap = get_row_text(row_ap);
     if (ap && strlen(ap) > 0) { g_ptr_array_add(args, g_strdup("-a")); g_ptr_array_add(args, g_strdup(ap)); }
     
-    const gchar *cp = gtk_entry_get_text(GTK_ENTRY(entry_cp));
+    const gchar *cp = get_row_text(row_cp);
     if (cp && strlen(cp) > 0) { g_ptr_array_add(args, g_strdup("-c")); g_ptr_array_add(args, g_strdup(cp)); }
     
-    const gchar *csc = gtk_entry_get_text(GTK_ENTRY(entry_csc));
+    const gchar *csc = get_row_text(row_csc);
     if (csc && strlen(csc) > 0) { g_ptr_array_add(args, g_strdup("-s")); g_ptr_array_add(args, g_strdup(csc)); }
     
-    const gchar *ums = gtk_entry_get_text(GTK_ENTRY(entry_ums));
+    const gchar *ums = get_row_text(row_ums);
     if (ums && strlen(ums) > 0) { g_ptr_array_add(args, g_strdup("-u")); g_ptr_array_add(args, g_strdup(ums)); }
     
-    gchar *dev = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo_device));
+    // Get selected device
+    guint selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(combo_device));
+    const char *dev = gtk_string_list_get_string(dev_list, selected);
     if (dev && g_strcmp0(dev, "No devices found") != 0 && strlen(dev) > 0) {
         g_ptr_array_add(args, g_strdup("-d"));
-        g_ptr_array_add(args, dev);
-    } else if (dev) {
-        g_free(dev);
+        g_ptr_array_add(args, g_strdup(dev));
     }
     
     g_ptr_array_add(args, NULL);
-    
     gchar **argv = (gchar **)g_ptr_array_free(args, FALSE);
     
     append_log("Started flashing...\n");
 
     GError *error = NULL;
     gboolean success = g_spawn_async_with_pipes(
-        NULL, argv, NULL,
-        G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH,
-        NULL, NULL,
-        &child_pid, NULL, &std_out, &std_err, &error
-    );
+        NULL, argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH,
+        NULL, NULL, &child_pid, NULL, &std_out, &std_err, &error);
 
     if (success) {
         gtk_button_set_label(GTK_BUTTON(btn_start), "Cancel Flash");
-        GtkStyleContext *context = gtk_widget_get_style_context(btn_start);
-        gtk_style_context_remove_class(context, "suggested-action");
-        gtk_style_context_add_class(context, "destructive-action");
+        gtk_widget_remove_css_class(btn_start, "suggested-action");
+        gtk_widget_add_css_class(btn_start, "destructive-action");
         
         pulse_timer_id = g_timeout_add(100, on_pulse_timer, NULL);
         
         GIOChannel *out_ch = g_io_channel_unix_new(std_out);
         g_io_channel_set_flags(out_ch, G_IO_FLAG_NONBLOCK, NULL);
-        g_io_channel_set_encoding(out_ch, NULL, NULL); 
         g_io_add_watch(out_ch, G_IO_IN | G_IO_HUP, read_output, NULL);
         g_io_channel_unref(out_ch);
 
         GIOChannel *err_ch = g_io_channel_unix_new(std_err);
         g_io_channel_set_flags(err_ch, G_IO_FLAG_NONBLOCK, NULL);
-        g_io_channel_set_encoding(err_ch, NULL, NULL);
         g_io_add_watch(err_ch, G_IO_IN | G_IO_HUP, read_output, NULL);
         g_io_channel_unref(err_ch);
 
@@ -342,127 +287,69 @@ void on_start_clicked(GtkWidget *widget, gpointer data) {
     g_strfreev(argv);
 }
 
-typedef struct {
-    GtkWidget *entry;
-    GtkWindow *parent_window;
-} FileRowData;
+static void on_file_dialog_response(GObject *source_object, GAsyncResult *res, gpointer user_data) {
+    GtkFileDialog *dialog = GTK_FILE_DIALOG(source_object);
+    GtkWidget *row = GTK_WIDGET(user_data);
+    GError *error = NULL;
+    GFile *file = gtk_file_dialog_open_finish(dialog, res, &error);
+    
+    if (file) {
+        char *path = g_file_get_path(file);
+        set_row_text(row, path);
+        g_free(path);
+        g_object_unref(file);
+    } else {
+        g_error_free(error);
+    }
+}
 
 static void on_browse_clicked(GtkWidget *button, gpointer user_data) {
-    FileRowData *data = (FileRowData *)user_data;
-    GtkFileChooserNative *native = gtk_file_chooser_native_new(
-        "Select File",
-        data->parent_window,
-        GTK_FILE_CHOOSER_ACTION_OPEN,
-        "_Open",
-        "_Cancel"
-    );
-    
-    gint res = gtk_native_dialog_run(GTK_NATIVE_DIALOG(native));
-    if (res == GTK_RESPONSE_ACCEPT) {
-        char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(native));
-        gtk_entry_set_text(GTK_ENTRY(data->entry), filename);
-        g_free(filename);
-    }
-    g_object_unref(native);
+    GtkWidget *row = GTK_WIDGET(user_data);
+    GtkFileDialog *dialog = gtk_file_dialog_new();
+    gtk_file_dialog_open(dialog, GTK_WINDOW(main_window), NULL, on_file_dialog_response, row);
+    g_object_unref(dialog);
 }
 
-GtkWidget* create_section_label(const char *text) {
-    GtkWidget *lbl = gtk_label_new(NULL);
-
-    // gnome settings style: uppercase + small + bold + dimmed (dim-label)
-    gchar *upper = g_utf8_strup(text, -1);
-    gchar *markup = g_strdup_printf(
-        "<span size='small' weight='bold'>%s</span>", upper);
-    gtk_label_set_markup(GTK_LABEL(lbl), markup);
-    g_free(upper);
-    g_free(markup);
-
-    gtk_widget_set_halign(lbl, GTK_ALIGN_START);
-    gtk_widget_set_margin_top(lbl, 18);
-    gtk_widget_set_margin_bottom(lbl, 4);
-    gtk_widget_set_margin_start(lbl, 2);
-
-    // 'dim-label' css class: gtk theme renders this as muted/grey automatically
-    gtk_style_context_add_class(gtk_widget_get_style_context(lbl), "dim-label");
-
-    return lbl;
+GtkWidget* create_file_row(const char *title, GtkWidget **row_out) {
+    GtkWidget *row = adw_entry_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), title);
+    
+    GtkWidget *btn = gtk_button_new_from_icon_name("document-open-symbolic");
+    gtk_widget_set_valign(btn, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(btn, "flat");
+    g_signal_connect(btn, "clicked", G_CALLBACK(on_browse_clicked), row);
+    
+    adw_entry_row_add_suffix(ADW_ENTRY_ROW(row), btn);
+    *row_out = row;
+    return row;
 }
 
-GtkWidget* create_switch_row(const char *label_text, GtkWidget **switch_out) {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    GtkWidget *lbl = gtk_label_new(label_text);
-    gtk_widget_set_halign(lbl, GTK_ALIGN_START);
-    gtk_widget_set_hexpand(lbl, TRUE);
-    
-    *switch_out = gtk_switch_new();
-    gtk_widget_set_valign(*switch_out, GTK_ALIGN_CENTER);
-    
-    gtk_box_pack_start(GTK_BOX(box), lbl, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(box), *switch_out, FALSE, FALSE, 0);
-    return box;
-}
-
-GtkWidget* create_file_row(const char *label_text, GtkWidget **entry_out, GtkWidget *parent_window) {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    GtkWidget *lbl = gtk_label_new(label_text);
-    gtk_widget_set_size_request(lbl, 100, -1);
-    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0);
-    
-    *entry_out = gtk_entry_new();
-    gtk_widget_set_hexpand(*entry_out, TRUE);
-    gtk_entry_set_placeholder_text(GTK_ENTRY(*entry_out), "No file selected...");
-    
-    GtkWidget *btn = gtk_button_new_with_label("Browse");
-    
-    FileRowData *data = g_new(FileRowData, 1);
-    data->entry = *entry_out;
-    data->parent_window = GTK_WINDOW(parent_window);
-    g_signal_connect(btn, "clicked", G_CALLBACK(on_browse_clicked), data);
-    
-    gtk_box_pack_start(GTK_BOX(box), lbl, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(box), *entry_out, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(box), btn, FALSE, FALSE, 0);
-    return box;
-}
-
-enum {
-    TARGET_URI_LIST
-};
-
-static GtkTargetEntry drag_targets[] = {
-    { (gchar *)"text/uri-list", 0, TARGET_URI_LIST }
-};
-
-void on_drag_data_received(GtkWidget *widget, GdkDragContext *context, gint x, gint y,
-                           GtkSelectionData *data, guint info, guint time, gpointer user_data) {
-    if (info == TARGET_URI_LIST) {
-        gchar **uris = gtk_selection_data_get_uris(data);
-        if (uris) {
-            for (int i = 0; uris[i] != NULL; i++) {
-                gchar *filename = g_filename_from_uri(uris[i], NULL, NULL);
-                if (filename) {
-                    gchar *basename = g_path_get_basename(filename);
-                    if (g_str_has_prefix(basename, "AP_") || g_str_has_prefix(basename, "KIES_HOME_")) {
-                        gtk_entry_set_text(GTK_ENTRY(entry_ap), filename);
-                    } else if (g_str_has_prefix(basename, "BL_")) {
-                        gtk_entry_set_text(GTK_ENTRY(entry_bl), filename);
-                    } else if (g_str_has_prefix(basename, "CP_")) {
-                        gtk_entry_set_text(GTK_ENTRY(entry_cp), filename);
-                    } else if (g_str_has_prefix(basename, "CSC_") || g_str_has_prefix(basename, "HOME_CSC_")) {
-                        gtk_entry_set_text(GTK_ENTRY(entry_csc), filename);
-                    } else if (g_str_has_prefix(basename, "USERDATA_")) {
-                        gtk_entry_set_text(GTK_ENTRY(entry_ums), filename);
-                    }
-                    g_free(basename);
-                    g_free(filename);
-                }
+static gboolean on_drop(GtkDropTarget *target, const GValue *value, double x, double y, gpointer data) {
+    if (G_VALUE_HOLDS(value, GDK_TYPE_FILE_LIST)) {
+        GdkFileList *list = g_value_get_boxed(value);
+        GSList *files = gdk_file_list_get_files(list);
+        for (GSList *l = files; l != NULL; l = l->next) {
+            GFile *f = l->data;
+            char *filename = g_file_get_path(f);
+            if (filename) {
+                gchar *basename = g_path_get_basename(filename);
+                if (g_str_has_prefix(basename, "AP_") || g_str_has_prefix(basename, "KIES_HOME_"))
+                    set_row_text(row_ap, filename);
+                else if (g_str_has_prefix(basename, "BL_"))
+                    set_row_text(row_bl, filename);
+                else if (g_str_has_prefix(basename, "CP_"))
+                    set_row_text(row_cp, filename);
+                else if (g_str_has_prefix(basename, "CSC_") || g_str_has_prefix(basename, "HOME_CSC_"))
+                    set_row_text(row_csc, filename);
+                else if (g_str_has_prefix(basename, "USERDATA_"))
+                    set_row_text(row_ums, filename);
+                g_free(basename);
+                g_free(filename);
             }
-            g_strfreev(uris);
         }
-        gtk_drag_finish(context, TRUE, FALSE, time);
-    } else {
-        gtk_drag_finish(context, FALSE, FALSE, time);
+        return TRUE;
     }
+    return FALSE;
 }
 
 static void toggle_action(GSimpleAction *a, GVariant *p, gpointer d) {
@@ -471,25 +358,155 @@ static void toggle_action(GSimpleAction *a, GVariant *p, gpointer d) {
     g_variant_unref(s);
 }
 
+static void on_activate(GtkApplication *app, gpointer user_data) {
+    main_window = adw_application_window_new(app);
+    gtk_window_set_default_size(GTK_WINDOW(main_window), 750, 800);
+    gtk_window_set_title(GTK_WINDOW(main_window), "Odin4 GUI");
+
+    // Drag and drop setup for GTK4
+    GtkDropTarget *target = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
+    g_signal_connect(target, "drop", G_CALLBACK(on_drop), NULL);
+    gtk_widget_add_controller(GTK_WIDGET(main_window), GTK_EVENT_CONTROLLER(target));
+
+    // Menu Actions
+    GSimpleActionGroup *action_group = g_simple_action_group_new();
+    action_reboot     = g_simple_action_new_stateful("reboot",     NULL, g_variant_new_boolean(TRUE));
+    action_nand_erase = g_simple_action_new_stateful("nand-erase", NULL, g_variant_new_boolean(FALSE));
+    action_val_check  = g_simple_action_new_stateful("val-check",  NULL, g_variant_new_boolean(FALSE));
+    g_signal_connect(action_reboot,     "activate", G_CALLBACK(toggle_action), NULL);
+    g_signal_connect(action_nand_erase, "activate", G_CALLBACK(toggle_action), NULL);
+    g_signal_connect(action_val_check,  "activate", G_CALLBACK(toggle_action), NULL);
+    g_action_map_add_action(G_ACTION_MAP(action_group), G_ACTION(action_reboot));
+    g_action_map_add_action(G_ACTION_MAP(action_group), G_ACTION(action_nand_erase));
+    g_action_map_add_action(G_ACTION_MAP(action_group), G_ACTION(action_val_check));
+    gtk_widget_insert_action_group(main_window, "opt", G_ACTION_GROUP(action_group));
+
+    GMenu *menu = g_menu_new();
+    GMenu *section = g_menu_new();
+    g_menu_append(section, "Auto Reboot",      "opt.reboot");
+    g_menu_append(section, "Nand Erase All",   "opt.nand-erase");
+    g_menu_append(section, "Validation Check", "opt.val-check");
+    g_menu_append_section(menu, "Flash Options", G_MENU_MODEL(section));
+    g_object_unref(section);
+
+    // Main layout
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    
+    // HeaderBar
+    GtkWidget *header = adw_header_bar_new();
+    
+    // In Adwaita, to add a subtitle we use AdwWindowTitle
+    GtkWidget *win_title = adw_window_title_new("Odin4 GUI", "Samsung Firmware Flasher");
+    adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), win_title);
+
+    GtkWidget *menu_btn = gtk_menu_button_new();
+    gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_btn), "open-menu-symbolic");
+    gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_btn), G_MENU_MODEL(menu));
+    gtk_widget_add_css_class(menu_btn, "flat");
+    adw_header_bar_pack_start(ADW_HEADER_BAR(header), menu_btn);
+
+    btn_start = gtk_button_new_with_label("Start Flash");
+    gtk_widget_add_css_class(btn_start, "suggested-action");
+    g_signal_connect(btn_start, "clicked", G_CALLBACK(on_start_clicked), NULL);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), btn_start);
+
+    gtk_box_append(GTK_BOX(vbox), header);
+
+    // Scrollable content wrapper for modern GNOME layout
+    GtkWidget *main_scroll = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(main_scroll, TRUE);
+    gtk_box_append(GTK_BOX(vbox), main_scroll);
+
+    // Preferences Page to hold the groups natively
+    GtkWidget *pref_page = adw_preferences_page_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(main_scroll), pref_page);
+
+    // Files Group
+    GtkWidget *group_files = adw_preferences_group_new();
+    adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(group_files), "Firmware Files");
+    adw_preferences_group_add(ADW_PREFERENCES_GROUP(group_files), create_file_row("BL", &row_bl));
+    adw_preferences_group_add(ADW_PREFERENCES_GROUP(group_files), create_file_row("AP", &row_ap));
+    adw_preferences_group_add(ADW_PREFERENCES_GROUP(group_files), create_file_row("CP", &row_cp));
+    adw_preferences_group_add(ADW_PREFERENCES_GROUP(group_files), create_file_row("CSC", &row_csc));
+    adw_preferences_group_add(ADW_PREFERENCES_GROUP(group_files), create_file_row("USERDATA", &row_ums));
+    adw_preferences_page_add(ADW_PREFERENCES_PAGE(pref_page), ADW_PREFERENCES_GROUP(group_files));
+
+    // Device Group
+    GtkWidget *group_device = adw_preferences_group_new();
+    adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(group_device), "Target Device");
+    
+    GtkWidget *dev_row = adw_action_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(dev_row), "Select Device");
+    
+    dev_list = gtk_string_list_new(NULL);
+    combo_device = gtk_drop_down_new(G_LIST_MODEL(dev_list), NULL);
+    gtk_widget_set_valign(combo_device, GTK_ALIGN_CENTER);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(dev_row), combo_device);
+    
+    btn_refresh = gtk_button_new_from_icon_name("view-refresh-symbolic");
+    gtk_widget_set_valign(btn_refresh, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(btn_refresh, "flat");
+    g_signal_connect(btn_refresh, "clicked", G_CALLBACK(on_refresh_clicked), NULL);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(dev_row), btn_refresh);
+    
+    adw_preferences_group_add(ADW_PREFERENCES_GROUP(group_device), dev_row);
+    adw_preferences_page_add(ADW_PREFERENCES_PAGE(pref_page), ADW_PREFERENCES_GROUP(group_device));
+
+    // Status Group
+    GtkWidget *group_status = adw_preferences_group_new();
+    adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(group_status), "Status &amp; Logs");
+
+    // Progress Bar wrapped in a box for padding
+    GtkWidget *prog_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_margin_top(prog_box, 10);
+    gtk_widget_set_margin_bottom(prog_box, 10);
+    progress_bar = gtk_progress_bar_new();
+    gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(progress_bar), TRUE);
+    gtk_progress_bar_set_text(GTK_PROGRESS_BAR(progress_bar), "Ready");
+    gtk_box_append(GTK_BOX(prog_box), progress_bar);
+    adw_preferences_group_add(ADW_PREFERENCES_GROUP(group_status), prog_box);
+
+    // Terminal log natively styled
+    GtkWidget *log_scrolled = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(log_scrolled), 250);
+    gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(log_scrolled), TRUE);
+    
+    text_log = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(text_log), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(text_log), TRUE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(text_log), GTK_WRAP_WORD_CHAR);
+    
+    // Simple padding for a clean native text field
+    gtk_widget_add_css_class(text_log, "log-view");
+    GtkCssProvider *css = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(css, "textview.log-view { padding: 12px; }");
+    gtk_style_context_add_provider_for_display(gdk_display_get_default(), 
+        GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(log_scrolled), text_log);
+    adw_preferences_group_add(ADW_PREFERENCES_GROUP(group_status), log_scrolled);
+
+    adw_preferences_page_add(ADW_PREFERENCES_PAGE(pref_page), ADW_PREFERENCES_GROUP(group_status));
+
+    adw_application_window_set_content(ADW_APPLICATION_WINDOW(main_window), vbox);
+    gtk_window_present(GTK_WINDOW(main_window));
+
+    // Initial refresh
+    on_refresh_clicked(NULL, NULL);
+}
+
 void self_register() {
     // reads the absolute path of the current executable file from /proc/self/exe
     char exe_path[4096] = {0};
     ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
     if (len <= 0) return;
     exe_path[len] = '\0';
-
-    // directory contains executable file
     gchar *exe_dir = g_path_get_dirname(exe_path);
-
-    // stores .desktop file to ~/.local/share/applications/odin4-gui.desktop
     const gchar *home = g_get_home_dir();
     gchar *desktop_dir = g_build_filename(home, ".local", "share", "applications", NULL);
     gchar *desktop_path = g_build_filename(desktop_dir, "odin4-gui.desktop", NULL);
-
-    // do nothing if file exsists
     if (!g_file_test(desktop_path, G_FILE_TEST_EXISTS)) {
         g_mkdir_with_parents(desktop_dir, 0755);
-
         gchar *content = g_strdup_printf(
             "[Desktop Entry]\n"
             "Name=Odin4\n"
@@ -502,157 +519,26 @@ void self_register() {
             "Categories=Utility;System;\n"
             "StartupWMClass=odin4_gui\n"
             "StartupNotify=true\n",
-            exe_path, exe_dir
-        );
-
+            exe_path, exe_dir);
         g_file_set_contents(desktop_path, content, -1, NULL);
         g_free(content);
-
         g_spawn_command_line_async("update-desktop-database ~/.local/share/applications", NULL);
     }
-
     g_free(exe_dir);
     g_free(desktop_dir);
     g_free(desktop_path);
 }
 
 int main(int argc, char *argv[]) {
-    gtk_init(&argc, &argv);
-
-    // register app to overview on first launch
     self_register();
-
     dbus_conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
 
-    GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_default_size(GTK_WINDOW(window), 800, 750);
-    gtk_window_set_icon_name(GTK_WINDOW(window), "system-software-install");
-    g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
-    
-    // enable drag and drop from file manager
-    gtk_drag_dest_set(window, GTK_DEST_DEFAULT_ALL, drag_targets, G_N_ELEMENTS(drag_targets), GDK_ACTION_COPY);
-    g_signal_connect(window, "drag-data-received", G_CALLBACK(on_drag_data_received), NULL);
+    AdwApplication *app = adw_application_new("com.example.odin4", G_APPLICATION_DEFAULT_FLAGS);
+    g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
 
-    // native header bar
-    GtkWidget *header = gtk_header_bar_new();
-    gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(header), TRUE);
-    gtk_header_bar_set_title(GTK_HEADER_BAR(header), "Odin4 GUI");
-    gtk_window_set_titlebar(GTK_WINDOW(window), header);
-
-    // --- hamburger menu (gmenumodel + gsimpleaction) ---
-
-    // 1. create action group and register stateful toggle actions
-    GSimpleActionGroup *action_group = g_simple_action_group_new();
-
-    action_reboot     = g_simple_action_new_stateful("reboot",     NULL, g_variant_new_boolean(TRUE));
-    action_nand_erase = g_simple_action_new_stateful("nand-erase", NULL, g_variant_new_boolean(FALSE));
-    action_val_check  = g_simple_action_new_stateful("val-check",  NULL, g_variant_new_boolean(FALSE));
-
-    g_signal_connect(action_reboot,     "activate", G_CALLBACK(toggle_action), NULL);
-    g_signal_connect(action_nand_erase, "activate", G_CALLBACK(toggle_action), NULL);
-    g_signal_connect(action_val_check,  "activate", G_CALLBACK(toggle_action), NULL);
-
-    g_action_map_add_action(G_ACTION_MAP(action_group), G_ACTION(action_reboot));
-    g_action_map_add_action(G_ACTION_MAP(action_group), G_ACTION(action_nand_erase));
-    g_action_map_add_action(G_ACTION_MAP(action_group), G_ACTION(action_val_check));
-
-    // 2. attach action group to window (prefix: "opt")
-    gtk_widget_insert_action_group(window, "opt", G_ACTION_GROUP(action_group));
-
-    // 3. define menu structure with gmenumodel
-    // passing a label as the 2nd arg to g_menu_append_section renders it as a section header
-    GMenu *menu = g_menu_new();
-
-    GMenu *section = g_menu_new();
-    g_menu_append(section, "Auto Reboot",      "opt.reboot");
-    g_menu_append(section, "Nand Erase All",   "opt.nand-erase");
-    g_menu_append(section, "Validation Check", "opt.val-check");
-    g_menu_append_section(menu, "Flash Options", G_MENU_MODEL(section));
-    g_object_unref(section);
-
-    // 4. attach menu model to menu button
-    GtkWidget *menu_btn = gtk_menu_button_new();
-    GtkWidget *menu_icon = gtk_image_new_from_icon_name("open-menu-symbolic", GTK_ICON_SIZE_BUTTON);
-    gtk_button_set_image(GTK_BUTTON(menu_btn), menu_icon);
-    gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_btn), G_MENU_MODEL(menu));
-    g_object_unref(menu);
-
-    gtk_header_bar_pack_start(GTK_HEADER_BAR(header), menu_btn);
-    // ---
-
-    GtkWidget *main_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    gtk_container_set_border_width(GTK_CONTAINER(main_vbox), 20); // inner margin
-    gtk_container_add(GTK_CONTAINER(window), main_vbox);
-
-    // files section
-    gtk_box_pack_start(GTK_BOX(main_vbox), create_section_label("Files"), FALSE, FALSE, 0);
-
-    GtkWidget *vbox_files = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    gtk_widget_set_margin_start(vbox_files, 10);
-    
-    gtk_box_pack_start(GTK_BOX(vbox_files), create_file_row("BL", &entry_bl, window), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(vbox_files), create_file_row("AP", &entry_ap, window), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(vbox_files), create_file_row("CP", &entry_cp, window), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(vbox_files), create_file_row("CSC", &entry_csc, window), FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(vbox_files), create_file_row("USERDATA", &entry_ums, window), FALSE, FALSE, 0);
-
-    gtk_box_pack_start(GTK_BOX(main_vbox), vbox_files, FALSE, FALSE, 0);
-
-    // separator
-    gtk_box_pack_start(GTK_BOX(main_vbox), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 5);
-
-    // device section
-    gtk_box_pack_start(GTK_BOX(main_vbox), create_section_label("Device"), FALSE, FALSE, 0);
-
-    GtkWidget *hbox_device = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    gtk_widget_set_margin_start(hbox_device, 10);
-    
-    combo_device = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo_device), "No devices found");
-    gtk_combo_box_set_active(GTK_COMBO_BOX(combo_device), 0);
-    
-    btn_refresh = gtk_button_new_with_label("Refresh List");
-    g_signal_connect(btn_refresh, "clicked", G_CALLBACK(on_refresh_clicked), NULL);
-    
-    gtk_box_pack_start(GTK_BOX(hbox_device), combo_device, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(hbox_device), btn_refresh, FALSE, FALSE, 0);
-    
-    gtk_box_pack_start(GTK_BOX(main_vbox), hbox_device, FALSE, FALSE, 0);
-
-    // separator
-    gtk_box_pack_start(GTK_BOX(main_vbox), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 10);
-
-    // progress Bar
-    progress_bar = gtk_progress_bar_new();
-    gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(progress_bar), TRUE);
-    gtk_progress_bar_set_text(GTK_PROGRESS_BAR(progress_bar), "Ready");
-    gtk_box_pack_start(GTK_BOX(main_vbox), progress_bar, FALSE, FALSE, 5);
-
-    // log section - minimum height for readability
-    GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
-    gtk_widget_set_size_request(scrolled, -1, 200);
-    text_log = gtk_text_view_new();
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(text_log), FALSE);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(text_log), TRUE);
-    gtk_container_add(GTK_CONTAINER(scrolled), text_log);
-    
-    // start flash button in header bar
-    btn_start = gtk_button_new_with_label("Start Flash");
-    GtkStyleContext *context = gtk_widget_get_style_context(btn_start);
-    gtk_style_context_add_class(context, "suggested-action");
-    g_signal_connect(btn_start, "clicked", G_CALLBACK(on_start_clicked), NULL);
-    gtk_header_bar_pack_end(GTK_HEADER_BAR(header), btn_start);
-
-    gtk_box_pack_start(GTK_BOX(main_vbox), scrolled, TRUE, TRUE, 0);
-
-    gtk_widget_show_all(window);
-    
-    // initial device list refresh
-    on_refresh_clicked(NULL, NULL);
-
-    gtk_main();
+    int status = g_application_run(G_APPLICATION(app), argc, argv);
+    g_object_unref(app);
 
     if (dbus_conn) g_object_unref(dbus_conn);
-
-    return 0;
+    return status;
 }
