@@ -587,7 +587,7 @@ void self_register() {
         "Icon=emblem-downloads\n"
         "Terminal=false\n"
         "Type=Application\n"
-        "Categories=GNOME;GTK;Utility;X-GNOME-Utilities;\n"
+        "Categories=Utility\n"
         "StartupWMClass=itstory.odin4\n"
         "StartupNotify=true\n",
         exe_path, exe_dir);
